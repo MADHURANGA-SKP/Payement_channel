@@ -1,9 +1,9 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 
+use sp_core::offchain::Timestamp;
+
 #[ink::contract]
 mod pay_channel {
-    use ink::primitives::AccountId;
-
 
     #[ink(storage)]
     pub struct PaymentChannel {
@@ -30,8 +30,8 @@ mod pay_channel {
 
     #[ink(event)]
     pub struct SenderCloseStarted {
-        expiration: TimeStamp,
-        close_duration: TimeStamp,
+        expiration: Timestamp,
+        close_duration: Timestamp,
     }
 
     impl PaymentChannel {
@@ -39,10 +39,10 @@ mod pay_channel {
         #[ink(constructor)]
         pub fn new(
             recipient:AccountId,
-            close_duration: TimeStamp
+            close_duration: Timestamp
         ) -> Self {
            Self {
-            sender : self::env().caller(),
+            sender : Self::env().caller(),
             recipient,
             expiration: None,
             withdrawn: 0,
@@ -54,34 +54,36 @@ mod pay_channel {
         pub fn close(
             &mut self, 
             amount: Balance, 
-            signature: [u8,65]
+            signature: [u8; 65]
         ) -> Result<()> {
             self.close_inner(amount, signature)?;
             self.env().terminate_contract(self.sender);
         }
 
+        /// We split this out in order to make testing `close` simpler.
         fn close_inner(
-            &mut self,
-            amount:Balance,
-            signature: [u8,65]
-        ) -> Result<()> {
+            &mut self, 
+            amount: Balance, 
+            signature: [u8; 65]) -> Result<()> {
             if self.env().caller() != self.recipient {
                 return Err(Error::CallerIsNotRecipient)
             }
 
-            if amount < self.withdraw {
+            if amount < self.withdrawn {
                 return Err(Error::AmmountIsLessThanWithdrawn)
             }
 
+            // Signature validation
             if !self.is_signature_valid(amount, signature) {
                 return Err(Error::InvalidSignature)
             }
 
-            #[allow(clippy::arithmatic_side_effects)]
+            // We checked that amount >= self.withdrawn
+            #[allow(clippy::arithmetic_side_effects)]
             self.env()
-                .transfer(self.recipient, amount - self.withdraw)
-                .map_err(|_| Error::TransferFailed)
-            
+                .transfer(self.recipient, amount - self.withdrawn)
+                .map_err(|_| Error::TransferFailed)?;
+
             Ok(())
         }
 
@@ -94,7 +96,7 @@ mod pay_channel {
             }
 
             let now = self.env().block_timestamp();
-            let expiration = now.check_add(self.close_duration).unwrap();
+            let expiration = now.checked_add(self.close_duration).unwrap();
 
             self.env().emit_event(SenderCloseStarted {
                 expiration,
@@ -102,6 +104,8 @@ mod pay_channel {
             });
 
             self.expiration = Some(expiration);
+
+            Ok(())
         }
 
         #[ink(message)]
@@ -115,7 +119,7 @@ mod pay_channel {
                         return Err(Error::NotYetExpired)
                     }
 
-                    self.env(),terminate_contract(self.sender);
+                    self.env().terminate_contract(self.sender);
                 } 
 
                 None => Err(Error::NotYetExpired)
@@ -123,10 +127,10 @@ mod pay_channel {
         }
 
         #[ink(message)]
-        pub fn withdraw(
+        pub fn withdrawn(
             &mut self,
             amount:Balance,
-            signature:[u8,65],
+            signature:[u8;65],
         ) -> Result<()> {
             if self.env().caller() != self.recipient {
                 return Err(Error::CallerIsNotRecipient)
@@ -136,13 +140,13 @@ mod pay_channel {
                 return Err(Error::InvalidSignature)
             }
 
-            if amount < self.withdraw {
+            if amount < self.withdrawn {
                 return Err(Error::AmmountIsLessThanWithdrawn)
             }
 
-            #[allow(clippy::arithmatic_side_effects)]
-            let amount_to_withdraw = amount - self.withdraw;
-            self.withdraw.check_add(amount_to_withdraw).unwrap();
+            #[allow(clippy::arithmetic_side_effects)]
+            let amount_to_withdraw = amount - self.withdrawn;
+            self.withdrawn.checked_add(amount_to_withdraw).unwrap();
 
             self.env()
                 .transfer(self.recipient, amount_to_withdraw)
@@ -162,23 +166,23 @@ mod pay_channel {
         }
 
         #[ink(message)]
-        pub fn get_expiration(&self) -> Option<TimeStamp> {
+        pub fn get_expiration(&self) -> Option<Timestamp> {
            self.expiration
         }
 
         #[ink(message)]
         pub fn get_withdrawn(&self) -> Balance {
-            self.withdraw
+            self.withdrawn
         }
 
         #[ink(message)]
-        pub fn get_close_duration(&self) -> TimeStamp {
+        pub fn get_close_duration(&self) -> Timestamp {
             self.close_duration
         }
 
         #[ink(message)]
         pub fn get_balance(&self) -> Balance {
-            self.get_balance
+            self.env().balance()
         }
 
     }
@@ -188,25 +192,26 @@ mod pay_channel {
         fn is_signature_valid(
             &self,
             amount: Balance,
-            signature: [u8, 65]
+            signature: [u8; 65]
         ) -> bool {
+            let encodable = (self.env().account_id(), amount);
             let mut message = <ink::env::hash::Sha2x256 as ink::env::hash::HashOutput>::Type::default();
             ink::env::hash_encoded::<ink::env::hash::Sha2x256, _>(
                 &encodable,
                 &mut message,
             );
 
-            let mut pub_key : [0; 33];
+            let mut pub_key = [0; 33];
             ink::env::ecdsa_recover(
                 &signature, 
                 &message,
                 &mut pub_key
-            ).unwrap_or_else(|err| panic! ("recover failed : {err: ?}"));
-            let mut signature_account_id = [0; 32]
+            ).unwrap_or_else(|err| panic! ("recover failed : {err:?}"));
+            let mut signature_account_id = [0; 32];
             <ink::env::hash::Blake2x256 as ink::env::hash::CryptoHash>::hash(
                 &pub_key,
                 &mut signature_account_id
-            )
+            );
 
             self.recipient == signature_account_id.into()
         }
